@@ -1,22 +1,21 @@
 {
-  "uuid": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-  "shortName": "Rain Drizzle Frog",
-  "longName": "Rain Drizzle Frog",
-  "companyName": "davv47",
-  "versionLabel": "1.0",
-  "sdkVersion": "3",
-  "targetPlatforms": ["aplite", "basalt", "chalk"],
-  "watchapp": {
-    "watchface": true
-  },
-  "appKeys": {
-    "WMO_CODE": 0,
-    "TEMPERATURE": 1,
-    "PRECIP_MM10": 2,
-    "FETCH_TIME": 3
-  },
-  "resources": {
-    "media": []
-  },
-  "capabilities": ["configurable"]
+    "author": "dfrench47@gmail.com",
+    "dependencies": {},
+    "keywords": [],
+    "name": "rain-drizzle-frog",
+    "pebble": {
+        "displayName": "Rain Drizzle Frog",
+        "enableMultiJS": true,
+        "messageKeys": [],
+        "projectType": "native",
+        "resources": {
+            "media": []
+        },
+        "sdkVersion": "3",
+        "uuid": "4394f16b-58c4-4372-ab91-be1fad1044b1",
+        "watchapp": {
+            "watchface": false
+        }
+    },
+    "version": "1.0.0"
 }
