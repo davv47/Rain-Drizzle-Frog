@@ -6,15 +6,21 @@
     "pebble": {
         "displayName": "Rain Drizzle Frog",
         "enableMultiJS": true,
-        "messageKeys": [],
+        "messageKeys": [
+            "WMO_CODE",
+            "TEMPERATURE",
+            "PRECIP_MM10",
+            "FETCH_TIME"
+        ],
         "projectType": "native",
         "resources": {
             "media": []
         },
         "sdkVersion": "3",
+        "targetPlatforms": ["aplite", "basalt", "chalk"],
         "uuid": "4394f16b-58c4-4372-ab91-be1fad1044b1",
         "watchapp": {
-            "watchface": false
+            "watchface": true
         }
     },
     "version": "1.0.0"
