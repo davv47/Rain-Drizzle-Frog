@@ -21,11 +21,8 @@
 #define WATER_SUBMERGED 4
 
 // ── Globals ───────────────────────────────────────────────────────────────────
-static Window   *s_window;
-static Layer    *s_canvas_layer;
-static TextLayer *s_time_layer;
-static TextLayer *s_date_layer;
-static TextLayer *s_precip_layer;
+static Window  *s_window;
+static Layer   *s_canvas_layer;
 
 static int s_wmo_code    = 0;
 static int s_temperature = 20;
@@ -34,6 +31,11 @@ static int s_precip_mm10 = 0;   // precipitation * 10 to avoid floats
 static char s_time_buf[8];
 static char s_date_buf[16];
 static char s_precip_buf[20];
+
+// Cached fonts (loaded once in window_load)
+static GFont s_font_time;
+static GFont s_font_date;
+static GFont s_font_precip;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 static int get_outfit(int wmo, int temp_c) {
@@ -132,6 +134,32 @@ static void fill_rect_c(GContext *ctx, GColor col, int x, int y, int w, int h) {
 static void draw_line_c(GContext *ctx, GColor col, int x0, int y0, int x1, int y1) {
   graphics_context_set_stroke_color(ctx, col);
   graphics_draw_line(ctx, GPoint(x0, y0), GPoint(x1, y1));
+}
+
+// ── Outlined text helper ──────────────────────────────────────────────────────
+// Draws text with a 1-pixel black outline by rendering it 4 times offset,
+// then once in the fill colour on top.
+static void draw_text_outlined(GContext *ctx, const char *text, GFont font,
+                                GRect box, GTextAlignment align,
+                                GColor fill, GColor outline) {
+  // 4 shadow passes (offset diagonals)
+  graphics_context_set_text_color(ctx, outline);
+  graphics_draw_text(ctx, text, font,
+    GRect(box.origin.x - 1, box.origin.y - 1, box.size.w, box.size.h),
+    GTextOverflowModeWordWrap, align, NULL);
+  graphics_draw_text(ctx, text, font,
+    GRect(box.origin.x + 1, box.origin.y - 1, box.size.w, box.size.h),
+    GTextOverflowModeWordWrap, align, NULL);
+  graphics_draw_text(ctx, text, font,
+    GRect(box.origin.x - 1, box.origin.y + 1, box.size.w, box.size.h),
+    GTextOverflowModeWordWrap, align, NULL);
+  graphics_draw_text(ctx, text, font,
+    GRect(box.origin.x + 1, box.origin.y + 1, box.size.w, box.size.h),
+    GTextOverflowModeWordWrap, align, NULL);
+  // Fill pass on top
+  graphics_context_set_text_color(ctx, fill);
+  graphics_draw_text(ctx, text, font, box,
+    GTextOverflowModeWordWrap, align, NULL);
 }
 
 // ── Background scene ──────────────────────────────────────────────────────────
@@ -337,7 +365,7 @@ static void draw_frog(GContext *ctx, int cx, int frog_y, int outfit, int water_l
       fill_rect_c(ctx, COL_SNOWSUIT, cx + 10, by + 12, 8, 6);
       // Hood
       fill_rect_c(ctx, COL_SNOWSUIT, cx - 12, hy - 6, 24, 10);
-      fill_rect_c(ctx, GColorPink, cx - 8, hy - 2, 16, 8); // face opening
+      fill_rect_c(ctx, GColorMelon, cx - 8, hy - 2, 16, 8); // face opening
       // Snowsuit boots
       fill_rect_c(ctx, GColorDarkGray, cx - 16, frog_y + 2, 11, 4);
       fill_rect_c(ctx, GColorDarkGray, cx + 5,  frog_y + 2, 11, 4);
@@ -373,21 +401,34 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
   int ground_y = bounds.size.h - 38;
   int cx = bounds.size.w / 2;
   draw_frog(ctx, cx, ground_y, outfit, water_level);
+
+  // 4. HUD — time, date, precip drawn directly with outlined text
+  // Time (large, top)
+  draw_text_outlined(ctx, s_time_buf, s_font_time,
+    GRect(0, 2, bounds.size.w, 42),
+    GTextAlignmentCenter, GColorWhite, GColorBlack);
+  // Date (below time)
+  draw_text_outlined(ctx, s_date_buf, s_font_date,
+    GRect(0, 44, bounds.size.w, 22),
+    GTextAlignmentCenter, GColorWhite, GColorBlack);
+  // Precip bar (solid black strip at bottom for readability)
+  fill_rect_c(ctx, GColorBlack, 0, bounds.size.h - 18, bounds.size.w, 18);
+  graphics_context_set_text_color(ctx, GColorWhite);
+  graphics_draw_text(ctx, s_precip_buf, s_font_precip,
+    GRect(0, bounds.size.h - 17, bounds.size.w, 16),
+    GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 }
 
 // ── Time / date / precip updates ──────────────────────────────────────────────
 static void update_time(struct tm *tick_time) {
   clock_copy_time_string(s_time_buf, sizeof(s_time_buf));
-  text_layer_set_text(s_time_layer, s_time_buf);
-
   strftime(s_date_buf, sizeof(s_date_buf), "%a %d %b", tick_time);
-  text_layer_set_text(s_date_layer, s_date_buf);
+  layer_mark_dirty(s_canvas_layer);
 }
 
 static void update_precip_text(void) {
   int mm_whole = s_precip_mm10 / 10;
   int mm_frac  = s_precip_mm10 % 10;
-  // Show rain level label
   const char *label;
   int level = get_water_level(s_precip_mm10);
   switch (level) {
@@ -399,7 +440,7 @@ static void update_precip_text(void) {
   }
   snprintf(s_precip_buf, sizeof(s_precip_buf), "%d.%dmm %s",
            mm_whole, mm_frac, label);
-  text_layer_set_text(s_precip_layer, s_precip_buf);
+  layer_mark_dirty(s_canvas_layer);
 }
 
 // ── Tick handler ─────────────────────────────────────────────────────────────
@@ -429,47 +470,26 @@ static void window_load(Window *window) {
   Layer *root = window_get_root_layer(window);
   GRect bounds = layer_get_bounds(root);
 
-  // Canvas fills the screen
+  // Load fonts once
+  s_font_time   = fonts_get_system_font(FONT_KEY_LECO_32_BOLD_NUMBERS);
+  s_font_date   = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
+  s_font_precip = fonts_get_system_font(FONT_KEY_GOTHIC_14);
+
+  // Canvas fills the screen — all drawing happens here
   s_canvas_layer = layer_create(bounds);
   layer_set_update_proc(s_canvas_layer, canvas_update_proc);
   layer_add_child(root, s_canvas_layer);
 
-  // Time — large, top centre
-  s_time_layer = text_layer_create(GRect(0, 2, bounds.size.w, 40));
-  text_layer_set_background_color(s_time_layer, GColorClear);
-  text_layer_set_text_color(s_time_layer, COL_TEXT_BG);
-  text_layer_set_font(s_time_layer, fonts_get_system_font(FONT_KEY_LECO_32_BOLD_NUMBERS));
-  text_layer_set_text_alignment(s_time_layer, GTextAlignmentCenter);
-  layer_add_child(root, text_layer_get_layer(s_time_layer));
-
-  // Date — below time
-  s_date_layer = text_layer_create(GRect(0, 42, bounds.size.w, 22));
-  text_layer_set_background_color(s_date_layer, GColorClear);
-  text_layer_set_text_color(s_date_layer, COL_TEXT_BG);
-  text_layer_set_font(s_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
-  text_layer_set_text_alignment(s_date_layer, GTextAlignmentCenter);
-  layer_add_child(root, text_layer_get_layer(s_date_layer));
-
-  // Precipitation — bottom strip
-  s_precip_layer = text_layer_create(GRect(0, bounds.size.h - 18, bounds.size.w, 18));
-  text_layer_set_background_color(s_precip_layer, GColorBlack);
-  text_layer_set_text_color(s_precip_layer, GColorWhite);
-  text_layer_set_font(s_precip_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
-  text_layer_set_text_alignment(s_precip_layer, GTextAlignmentCenter);
-  layer_add_child(root, text_layer_get_layer(s_precip_layer));
-
-  // Seed time
+  // Seed buffers before first draw
   time_t now = time(NULL);
   struct tm *t = localtime(&now);
-  update_time(t);
-  update_precip_text();
+  clock_copy_time_string(s_time_buf, sizeof(s_time_buf));
+  strftime(s_date_buf, sizeof(s_date_buf), "%a %d %b", t);
+  snprintf(s_precip_buf, sizeof(s_precip_buf), "0.0mm dry");
 }
 
 static void window_unload(Window *window) {
   layer_destroy(s_canvas_layer);
-  text_layer_destroy(s_time_layer);
-  text_layer_destroy(s_date_layer);
-  text_layer_destroy(s_precip_layer);
 }
 
 // ── Init / deinit ─────────────────────────────────────────────────────────────
