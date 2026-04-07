@@ -4,6 +4,9 @@
     "keywords": [],
     "name": "rain-drizzle-frog",
     "pebble": {
+        "capabilities": [
+            "location"
+        ],
         "displayName": "Rain Drizzle Frog",
         "enableMultiJS": true,
         "messageKeys": [
@@ -15,31 +18,21 @@
         "projectType": "native",
         "resources": {
             "media": [
-                {"type":"png","name":"IMAGE_BG_CLEAR",                  "file":"images/bg_clear.png"},
-                {"type":"png","name":"IMAGE_BG_CLOUDY",                 "file":"images/bg_cloudy.png"},
-                {"type":"png","name":"IMAGE_BG_RAIN",                   "file":"images/bg_rain.png"},
-                {"type":"png","name":"IMAGE_BG_SNOW",                   "file":"images/bg_snow.png"},
-                {"type":"png","name":"IMAGE_BG_STORM",                  "file":"images/bg_storm.png"},
-                {"type":"png","name":"IMAGE_BG_NIGHT",                  "file":"images/bg_night.png"},
-                {"type":"png","name":"IMAGE_FROG_NAKED",                "file":"images/frog_naked.png"},
-                {"type":"png","name":"IMAGE_FROG_SWIMSUIT",             "file":"images/frog_swimsuit.png"},
-                {"type":"png","name":"IMAGE_FROG_RAINCOAT",             "file":"images/frog_raincoat.png"},
-                {"type":"png","name":"IMAGE_FROG_SCARF",                "file":"images/frog_scarf.png"},
-                {"type":"png","name":"IMAGE_FROG_SNOWSUIT",             "file":"images/frog_snowsuit.png"},
-                {"type":"png","name":"IMAGE_FROG_SUBMERGED",            "file":"images/frog_submerged.png"},
-                {"type":"png","name":"IMAGE_GROUND_DRY",                "file":"images/ground_dry.png"},
-                {"type":"png","name":"IMAGE_GROUND_PUDDLE_ANKLE",       "file":"images/ground_puddle_ankle.png"},
-                {"type":"png","name":"IMAGE_GROUND_PUDDLE_KNEE",        "file":"images/ground_puddle_knee.png"},
-                {"type":"png","name":"IMAGE_GROUND_PUDDLE_WAIST",       "file":"images/ground_puddle_waist.png"},
-                {"type":"png","name":"IMAGE_GROUND_PUDDLE_SUBMERGED",   "file":"images/ground_puddle_submerged.png"},
-                {"type":"png","name":"IMAGE_GROUND_SNOW_ANKLE",         "file":"images/ground_snow_ankle.png"},
-                {"type":"png","name":"IMAGE_GROUND_SNOW_KNEE",          "file":"images/ground_snow_knee.png"},
-                {"type":"png","name":"IMAGE_GROUND_SNOW_WAIST",         "file":"images/ground_snow_waist.png"},
-                {"type":"png","name":"IMAGE_GROUND_SNOW_SUBMERGED",     "file":"images/ground_snow_submerged.png"}
+                {
+                    "file": "images/bg_clear.png",
+                    "name": "BG_CLEAR_TEST",
+                    "targetPlatforms": null,
+                    "type": "png"
+                }
             ]
         },
         "sdkVersion": "3",
-        "targetPlatforms": ["chalk"],
+        "targetPlatforms": [
+            "basalt",
+            "chalk",
+            "emery",
+            "gabbro"
+        ],
         "uuid": "4394f16b-58c4-4372-ab91-be1fad1044b1",
         "watchapp": {
             "watchface": true
