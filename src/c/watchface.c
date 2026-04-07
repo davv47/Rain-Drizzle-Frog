@@ -1,24 +1,48 @@
 #include <pebble.h>
 
 // ── AppMessage keys ───────────────────────────────────────────────────────────
-#define KEY_WMO_CODE   0
+#define KEY_WMO_CODE    0
 #define KEY_TEMPERATURE 1
 #define KEY_PRECIP_MM10 2
 #define KEY_FETCH_TIME  3
 
 // ── Outfit IDs ────────────────────────────────────────────────────────────────
-#define OUTFIT_NAKED    0   // mild / cloudy
-#define OUTFIT_SWIMSUIT 1   // hot & sunny
-#define OUTFIT_RAINCOAT 2   // rain / drizzle / storm
-#define OUTFIT_SCARF    3   // cold / windy / overcast
-#define OUTFIT_SNOWSUIT 4   // snow
+#define OUTFIT_NAKED    0
+#define OUTFIT_SWIMSUIT 1
+#define OUTFIT_RAINCOAT 2
+#define OUTFIT_SCARF    3
+#define OUTFIT_SNOWSUIT 4
 
-// ── Water levels ──────────────────────────────────────────────────────────────
-#define WATER_DRY       0
-#define WATER_ANKLE     1
-#define WATER_KNEE      2
-#define WATER_WAIST     3
-#define WATER_SUBMERGED 4
+// ── Water / snow level IDs ────────────────────────────────────────────────────
+#define LEVEL_DRY       0
+#define LEVEL_ANKLE     1
+#define LEVEL_KNEE      2
+#define LEVEL_WAIST     3
+#define LEVEL_SUBMERGED 4
+
+// ── Sky type IDs ──────────────────────────────────────────────────────────────
+#define SKY_CLEAR  0
+#define SKY_CLOUDY 1
+#define SKY_RAIN   2
+#define SKY_SNOW   3
+#define SKY_STORM  4
+#define SKY_NIGHT  5   // set when hour < 6 or hour >= 21
+
+// ── Frog sprite dimensions on-screen (Gabbro 260x260) ────────────────────────
+// Source PNGs are 153x192 (48*3.2 x 60*3.2, nearest-neighbour scaled).
+// We blit them at their natural size — 153x192 pixels.
+#define FROG_W 153
+#define FROG_H 192
+
+// Frog foot Y position (bottom of sprite) per water level.
+// Ground starts at y=182. Puddle centre at y=184; frog sinks into it slightly.
+static const int FROG_FOOT_Y[5] = {
+  182,   // DRY     — feet on grass
+  186,   // ANKLE   — slightly in puddle
+  190,   // KNEE    — deeper
+  194,   // WAIST   — deeper still
+  192,   // SUBMERGED — only eyes sprite used; position matches puddle surface
+};
 
 // ── Globals ───────────────────────────────────────────────────────────────────
 static Window  *s_window;
@@ -26,469 +50,249 @@ static Layer   *s_canvas_layer;
 
 static int s_wmo_code    = 0;
 static int s_temperature = 20;
-static int s_precip_mm10 = 0;   // precipitation * 10 to avoid floats
+static int s_precip_mm10 = 0;
+static int s_hour        = 12;   // updated each minute
 
 static char s_time_buf[8];
 static char s_date_buf[16];
-static char s_precip_buf[20];
+static char s_precip_buf[16];
+static char s_temp_buf[12];
 
-// Cached fonts (loaded once in window_load)
 static GFont s_font_time;
-static GFont s_font_date;
-static GFont s_font_precip;
+static GFont s_font_info;
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── Cached bitmaps ────────────────────────────────────────────────────────────
+// Backgrounds  (6)
+static GBitmap *s_bg[6];
+// Frog sprites (6: 5 outfits + submerged)
+static GBitmap *s_frog[6];
+// Ground/puddle (5 levels, rain variant)
+static GBitmap *s_ground_puddle[5];
+// Ground/snow   (5 levels, snow variant — index 0 = dry, same as puddle[0])
+static GBitmap *s_ground_snow[5];
+
+// ── Resource ID tables ────────────────────────────────────────────────────────
+static const uint32_t BG_RESOURCES[6] = {
+  RESOURCE_ID_IMAGE_BG_CLEAR,
+  RESOURCE_ID_IMAGE_BG_CLOUDY,
+  RESOURCE_ID_IMAGE_BG_RAIN,
+  RESOURCE_ID_IMAGE_BG_SNOW,
+  RESOURCE_ID_IMAGE_BG_STORM,
+  RESOURCE_ID_IMAGE_BG_NIGHT,
+};
+
+static const uint32_t FROG_RESOURCES[6] = {
+  RESOURCE_ID_IMAGE_FROG_NAKED,
+  RESOURCE_ID_IMAGE_FROG_SWIMSUIT,
+  RESOURCE_ID_IMAGE_FROG_RAINCOAT,
+  RESOURCE_ID_IMAGE_FROG_SCARF,
+  RESOURCE_ID_IMAGE_FROG_SNOWSUIT,
+  RESOURCE_ID_IMAGE_FROG_SUBMERGED,
+};
+
+static const uint32_t GROUND_PUDDLE_RESOURCES[5] = {
+  RESOURCE_ID_IMAGE_GROUND_DRY,
+  RESOURCE_ID_IMAGE_GROUND_PUDDLE_ANKLE,
+  RESOURCE_ID_IMAGE_GROUND_PUDDLE_KNEE,
+  RESOURCE_ID_IMAGE_GROUND_PUDDLE_WAIST,
+  RESOURCE_ID_IMAGE_GROUND_PUDDLE_SUBMERGED,
+};
+
+static const uint32_t GROUND_SNOW_RESOURCES[5] = {
+  RESOURCE_ID_IMAGE_GROUND_DRY,
+  RESOURCE_ID_IMAGE_GROUND_SNOW_ANKLE,
+  RESOURCE_ID_IMAGE_GROUND_SNOW_KNEE,
+  RESOURCE_ID_IMAGE_GROUND_SNOW_WAIST,
+  RESOURCE_ID_IMAGE_GROUND_SNOW_SUBMERGED,
+};
+
+// ── Logic helpers ─────────────────────────────────────────────────────────────
+static int get_sky_type(int wmo, int hour) {
+  if (hour < 6 || hour >= 21) return SKY_NIGHT;
+  if (wmo >= 95)              return SKY_STORM;
+  if ((wmo>=51&&wmo<=67)||(wmo>=80&&wmo<=84)) return SKY_RAIN;
+  if (wmo>=71&&wmo<=86)       return SKY_SNOW;
+  if (wmo >= 3)               return SKY_CLOUDY;
+  return SKY_CLEAR;
+}
+
 static int get_outfit(int wmo, int temp_c) {
-  // Snow
-  if ((wmo >= 71 && wmo <= 77) || wmo == 85 || wmo == 86) {
-    return OUTFIT_SNOWSUIT;
-  }
-  // Rain / drizzle / storms
-  if ((wmo >= 51 && wmo <= 67) || (wmo >= 80 && wmo <= 84) || (wmo >= 95 && wmo <= 99)) {
-    return OUTFIT_RAINCOAT;
-  }
-  // Cold / fog / overcast
-  if (wmo >= 3 || (wmo >= 45 && wmo <= 48) || temp_c < 10) {
-    return OUTFIT_SCARF;
-  }
-  // Hot & sunny
-  if (wmo == 0 && temp_c >= 25) {
-    return OUTFIT_SWIMSUIT;
-  }
-  // Default: mild / partly cloudy
+  if ((wmo>=71&&wmo<=77)||wmo==85||wmo==86)         return OUTFIT_SNOWSUIT;
+  if ((wmo>=51&&wmo<=67)||(wmo>=80&&wmo<=84)||(wmo>=95&&wmo<=99)) return OUTFIT_RAINCOAT;
+  if (wmo>=3||(wmo>=45&&wmo<=48)||temp_c<10)        return OUTFIT_SCARF;
+  if (wmo==0&&temp_c>=25)                           return OUTFIT_SWIMSUIT;
   return OUTFIT_NAKED;
 }
 
-static int get_water_level(int precip_mm10) {
-  // precip_mm10 is precipitation_mm * 10
-  if (precip_mm10 == 0)          return WATER_DRY;
-  if (precip_mm10 < 20)          return WATER_ANKLE;   // < 2 mm
-  if (precip_mm10 < 100)         return WATER_KNEE;    // 2–10 mm
-  if (precip_mm10 < 250)         return WATER_WAIST;   // 10–25 mm
-  return WATER_SUBMERGED;                               // 25+ mm
+static int get_level(int precip_mm10) {
+  if (precip_mm10 == 0)  return LEVEL_DRY;
+  if (precip_mm10 < 20)  return LEVEL_ANKLE;
+  if (precip_mm10 < 100) return LEVEL_KNEE;
+  if (precip_mm10 < 250) return LEVEL_WAIST;
+  return LEVEL_SUBMERGED;
 }
 
-// ── Palette helpers ───────────────────────────────────────────────────────────
-#ifdef PBL_COLOR
-  #define COL_SKY_CLEAR    GColorVividCerulean
-  #define COL_SKY_CLOUDY   GColorLightGray
-  #define COL_SKY_RAIN     GColorCobaltBlue
-  #define COL_SKY_SNOW     GColorWhite
-  #define COL_SKY_STORM    GColorImperialPurple
-  #define COL_GROUND       GColorIslamicGreen
-  #define COL_WATER_1      GColorPictonBlue
-  #define COL_WATER_2      GColorCyan
-  #define COL_FROG_BODY    GColorIslamicGreen
-  #define COL_FROG_BELLY   GColorMintGreen
-  #define COL_FROG_EYE_W   GColorWhite
-  #define COL_FROG_EYE_P   GColorBlack
-  #define COL_FROG_MOUTH   GColorDarkCandyAppleRed
-  #define COL_RAINCOAT     GColorYellow
-  #define COL_RAINCOAT_BTN GColorOrange
-  #define COL_BOOT         GColorOrange
-  #define COL_SCARF        GColorRed
-  #define COL_UMBRELLA     GColorBlue
-  #define COL_SNOWSUIT     GColorIcterine
-  #define COL_SWIMSUIT     GColorMagenta
-  #define COL_SUN          GColorYellow
-  #define COL_CLOUD        GColorWhite
-  #define COL_RAINDROP     GColorPictonBlue
-  #define COL_SNOWFLAKE    GColorWhite
-  #define COL_TEXT         GColorBlack
-  #define COL_TEXT_BG      GColorWhite
-#else
-  #define COL_SKY_CLEAR    GColorLightGray
-  #define COL_SKY_CLOUDY   GColorLightGray
-  #define COL_SKY_RAIN     GColorDarkGray
-  #define COL_SKY_SNOW     GColorWhite
-  #define COL_SKY_STORM    GColorBlack
-  #define COL_GROUND       GColorDarkGray
-  #define COL_WATER_1      GColorLightGray
-  #define COL_WATER_2      GColorWhite
-  #define COL_FROG_BODY    GColorDarkGray
-  #define COL_FROG_BELLY   GColorLightGray
-  #define COL_FROG_EYE_W   GColorWhite
-  #define COL_FROG_EYE_P   GColorBlack
-  #define COL_FROG_MOUTH   GColorBlack
-  #define COL_RAINCOAT     GColorLightGray
-  #define COL_RAINCOAT_BTN GColorBlack
-  #define COL_BOOT         GColorBlack
-  #define COL_SCARF        GColorLightGray
-  #define COL_UMBRELLA     GColorDarkGray
-  #define COL_SNOWSUIT     GColorWhite
-  #define COL_SWIMSUIT     GColorDarkGray
-  #define COL_SUN          GColorWhite
-  #define COL_CLOUD        GColorWhite
-  #define COL_RAINDROP     GColorLightGray
-  #define COL_SNOWFLAKE    GColorWhite
-  #define COL_TEXT         GColorBlack
-  #define COL_TEXT_BG      GColorWhite
-#endif
-
-// ── Drawing helpers ───────────────────────────────────────────────────────────
-static void fill_rect_c(GContext *ctx, GColor col, int x, int y, int w, int h) {
-  graphics_context_set_fill_color(ctx, col);
-  graphics_fill_rect(ctx, GRect(x, y, w, h), 0, GCornerNone);
-}
-
-static void draw_line_c(GContext *ctx, GColor col, int x0, int y0, int x1, int y1) {
-  graphics_context_set_stroke_color(ctx, col);
-  graphics_draw_line(ctx, GPoint(x0, y0), GPoint(x1, y1));
+static bool is_snow_mode(int temp_c, int wmo) {
+  return temp_c < 0 && ((wmo>=71&&wmo<=77)||wmo==85||wmo==86);
 }
 
 // ── Outlined text helper ──────────────────────────────────────────────────────
-// Draws text with a 1-pixel black outline by rendering it 4 times offset,
-// then once in the fill colour on top.
 static void draw_text_outlined(GContext *ctx, const char *text, GFont font,
-                                GRect box, GTextAlignment align,
-                                GColor fill, GColor outline) {
-  // 4 shadow passes (offset diagonals)
-  graphics_context_set_text_color(ctx, outline);
+                                GRect box, GTextAlignment align) {
+  graphics_context_set_text_color(ctx, GColorBlack);
   graphics_draw_text(ctx, text, font,
-    GRect(box.origin.x - 1, box.origin.y - 1, box.size.w, box.size.h),
+    GRect(box.origin.x-1, box.origin.y-1, box.size.w, box.size.h),
     GTextOverflowModeWordWrap, align, NULL);
   graphics_draw_text(ctx, text, font,
-    GRect(box.origin.x + 1, box.origin.y - 1, box.size.w, box.size.h),
+    GRect(box.origin.x+1, box.origin.y-1, box.size.w, box.size.h),
     GTextOverflowModeWordWrap, align, NULL);
   graphics_draw_text(ctx, text, font,
-    GRect(box.origin.x - 1, box.origin.y + 1, box.size.w, box.size.h),
+    GRect(box.origin.x-1, box.origin.y+1, box.size.w, box.size.h),
     GTextOverflowModeWordWrap, align, NULL);
   graphics_draw_text(ctx, text, font,
-    GRect(box.origin.x + 1, box.origin.y + 1, box.size.w, box.size.h),
+    GRect(box.origin.x+1, box.origin.y+1, box.size.w, box.size.h),
     GTextOverflowModeWordWrap, align, NULL);
-  // Fill pass on top
-  graphics_context_set_text_color(ctx, fill);
+  graphics_context_set_text_color(ctx, GColorWhite);
   graphics_draw_text(ctx, text, font, box,
     GTextOverflowModeWordWrap, align, NULL);
 }
 
-// ── Background scene ──────────────────────────────────────────────────────────
-static void draw_background(GContext *ctx, GRect bounds, int wmo, int temp_c) {
-  // Sky colour
-  GColor sky;
-  if (wmo >= 95) {
-    sky = COL_SKY_STORM;
-  } else if ((wmo >= 51 && wmo <= 67) || (wmo >= 80 && wmo <= 84)) {
-    sky = COL_SKY_RAIN;
-  } else if ((wmo >= 71 && wmo <= 86)) {
-    sky = COL_SKY_SNOW;
-  } else if (wmo >= 3) {
-    sky = COL_SKY_CLOUDY;
-  } else {
-    sky = COL_SKY_CLEAR;
-  }
-  fill_rect_c(ctx, sky, 0, 0, bounds.size.w, bounds.size.h);
-
-  // Sun (clear / hot)
-  if (wmo <= 1 && temp_c >= 15) {
-    fill_rect_c(ctx, COL_SUN, bounds.size.w - 30, 8, 20, 20);
-    // Rays
-    graphics_context_set_stroke_color(ctx, COL_SUN);
-    draw_line_c(ctx, COL_SUN, bounds.size.w - 20, 4, bounds.size.w - 20, 6);
-    draw_line_c(ctx, COL_SUN, bounds.size.w - 20, 30, bounds.size.w - 20, 32);
-    draw_line_c(ctx, COL_SUN, bounds.size.w - 34, 18, bounds.size.w - 32, 18);
-    draw_line_c(ctx, COL_SUN, bounds.size.w - 8, 18, bounds.size.w - 6, 18);
-    draw_line_c(ctx, COL_SUN, bounds.size.w - 31, 8, bounds.size.w - 29, 10);
-    draw_line_c(ctx, COL_SUN, bounds.size.w - 11, 8, bounds.size.w - 9, 10);
-    draw_line_c(ctx, COL_SUN, bounds.size.w - 31, 28, bounds.size.w - 29, 26);
-    draw_line_c(ctx, COL_SUN, bounds.size.w - 11, 28, bounds.size.w - 9, 26);
-  }
-
-  // Cloud (cloudy / overcast)
-  if (wmo >= 2 && wmo <= 3) {
-    fill_rect_c(ctx, COL_CLOUD, 8,  10, 30, 12);
-    fill_rect_c(ctx, COL_CLOUD, 14, 6,  18, 8);
-    fill_rect_c(ctx, COL_CLOUD, 40, 18, 26, 10);
-    fill_rect_c(ctx, COL_CLOUD, 44, 14, 16, 6);
-  }
-
-  // Rain drops
-  if ((wmo >= 51 && wmo <= 67) || (wmo >= 80 && wmo <= 84) || (wmo >= 95 && wmo <= 99)) {
-    graphics_context_set_stroke_color(ctx, COL_RAINDROP);
-    graphics_context_set_stroke_width(ctx, 1);
-    for (int i = 0; i < 10; i++) {
-      int rx = 8 + i * 13;
-      int ry = 12 + (i % 3) * 10;
-      draw_line_c(ctx, COL_RAINDROP, rx, ry, rx - 2, ry + 6);
-    }
-  }
-
-  // Snow flakes
-  if ((wmo >= 71 && wmo <= 77) || wmo == 85 || wmo == 86) {
-    for (int i = 0; i < 8; i++) {
-      int sx = 10 + i * 16;
-      int sy = 10 + (i % 3) * 12;
-      draw_line_c(ctx, COL_SNOWFLAKE, sx - 3, sy, sx + 3, sy);
-      draw_line_c(ctx, COL_SNOWFLAKE, sx, sy - 3, sx, sy + 3);
-    }
-  }
-
-  // Lightning bolt (thunderstorm)
-  if (wmo >= 95 && wmo <= 99) {
-    graphics_context_set_stroke_color(ctx, COL_SUN);
-    draw_line_c(ctx, COL_SUN, 20, 20, 14, 34);
-    draw_line_c(ctx, COL_SUN, 14, 34, 20, 34);
-    draw_line_c(ctx, COL_SUN, 20, 34, 14, 48);
-  }
-}
-
-// ── Ground + water ────────────────────────────────────────────────────────────
-static void draw_ground_water(GContext *ctx, GRect bounds, int water_level) {
-  int ground_y = bounds.size.h - 38;
-
-  // Grass strip
-  fill_rect_c(ctx, COL_GROUND, 0, ground_y, bounds.size.w, bounds.size.h - ground_y);
-
-  if (water_level == WATER_DRY) return;
-
-  // Water surface heights (from ground_y upward, relative to frog bottom)
-  // Frog is drawn with feet at ground_y; body ~28px tall
-  int water_tops[] = { 0, ground_y + 4, ground_y - 8, ground_y - 18, ground_y - 26 };
-  int wy = water_tops[water_level];
-
-  // Animate with two-tone stripes
-  for (int y = wy; y < bounds.size.h; y++) {
-    GColor wc = ((y - wy) % 4 < 2) ? COL_WATER_1 : COL_WATER_2;
-    draw_line_c(ctx, wc, 0, y, bounds.size.w, y);
-  }
-  // Ripple line at surface
-  draw_line_c(ctx, GColorWhite, 0, wy, bounds.size.w, wy);
-  draw_line_c(ctx, GColorWhite, 4, wy + 2, 18, wy + 2);
-  draw_line_c(ctx, GColorWhite, bounds.size.w - 20, wy + 2, bounds.size.w - 6, wy + 2);
-}
-
-// ── Frog sprite ───────────────────────────────────────────────────────────────
-// Frog centre-x, feet at frog_y. ~22px wide, ~28px tall.
-static void draw_frog(GContext *ctx, int cx, int frog_y, int outfit, int water_level) {
-  int by = frog_y - 28;  // body top
-
-  // ── Legs (back and front) ────────────────────────────────────────────────
-  // Back legs wide, front legs tucked
-  fill_rect_c(ctx, COL_FROG_BODY, cx - 14, frog_y - 8, 10, 8);  // left back leg
-  fill_rect_c(ctx, COL_FROG_BODY, cx + 4,  frog_y - 8, 10, 8);  // right back leg
-  fill_rect_c(ctx, COL_FROG_BODY, cx - 10, frog_y - 4, 6,  4);  // left front leg
-  fill_rect_c(ctx, COL_FROG_BODY, cx + 4,  frog_y - 4, 6,  4);  // right front leg
-
-  // Webbed feet (3 small toes)
-  for (int t = 0; t < 3; t++) {
-    fill_rect_c(ctx, COL_FROG_BODY, cx - 16 + t * 3, frog_y,     2, 3);
-    fill_rect_c(ctx, COL_FROG_BODY, cx + 4  + t * 3, frog_y,     2, 3);
-  }
-
-  // ── Body ─────────────────────────────────────────────────────────────────
-  fill_rect_c(ctx, COL_FROG_BODY,  cx - 11, by,     22, 20);
-  fill_rect_c(ctx, COL_FROG_BELLY, cx - 7,  by + 6, 14, 12);
-
-  // ── Head ─────────────────────────────────────────────────────────────────
-  int hy = by - 14;
-  fill_rect_c(ctx, COL_FROG_BODY, cx - 11, hy,     22, 16);
-
-  // Eyes (bulging, 2px above head top)
-  fill_rect_c(ctx, COL_FROG_BODY,  cx - 13, hy - 2, 8, 8);
-  fill_rect_c(ctx, COL_FROG_BODY,  cx + 5,  hy - 2, 8, 8);
-  fill_rect_c(ctx, COL_FROG_EYE_W, cx - 12, hy - 1, 6, 6);
-  fill_rect_c(ctx, COL_FROG_EYE_W, cx + 6,  hy - 1, 6, 6);
-  fill_rect_c(ctx, COL_FROG_EYE_P, cx - 11, hy,     3, 3);
-  fill_rect_c(ctx, COL_FROG_EYE_P, cx + 8,  hy,     3, 3);
-
-  // Nostril dots
-  fill_rect_c(ctx, GColorBlack, cx - 2, hy + 8, 2, 2);
-  fill_rect_c(ctx, GColorBlack, cx + 2, hy + 8, 2, 2);
-
-  // Mouth (smile baseline)
-  draw_line_c(ctx, COL_FROG_MOUTH, cx - 6, hy + 12, cx - 2, hy + 14);
-  draw_line_c(ctx, COL_FROG_MOUTH, cx - 2, hy + 14, cx + 2, hy + 14);
-  draw_line_c(ctx, COL_FROG_MOUTH, cx + 2, hy + 14, cx + 6, hy + 12);
-
-  // ── Outfit layer ─────────────────────────────────────────────────────────
-  switch (outfit) {
-
-    case OUTFIT_SWIMSUIT: {
-      // Bright swimsuit top + trunks
-      fill_rect_c(ctx, COL_SWIMSUIT, cx - 8,  by + 2, 16, 8);  // top
-      fill_rect_c(ctx, COL_SWIMSUIT, cx - 8,  by + 12, 16, 6); // trunks
-      // Goggles on head
-      fill_rect_c(ctx, COL_UMBRELLA, cx - 9, hy + 1, 6, 4);
-      fill_rect_c(ctx, COL_UMBRELLA, cx + 3, hy + 1, 6, 4);
-      draw_line_c(ctx, GColorBlack, cx - 3, hy + 3, cx + 3, hy + 3);
-      break;
-    }
-
-    case OUTFIT_RAINCOAT: {
-      // Yellow raincoat body
-      fill_rect_c(ctx, COL_RAINCOAT, cx - 12, by - 2, 24, 24);
-      // Collar
-      fill_rect_c(ctx, COL_RAINCOAT, cx - 6,  by - 4, 12, 4);
-      // Buttons
-      fill_rect_c(ctx, COL_RAINCOAT_BTN, cx - 1, by + 4,  2, 2);
-      fill_rect_c(ctx, COL_RAINCOAT_BTN, cx - 1, by + 10, 2, 2);
-      // Boots
-      fill_rect_c(ctx, COL_BOOT, cx - 16, frog_y - 8, 10, 12);
-      fill_rect_c(ctx, COL_BOOT, cx + 6,  frog_y - 8, 10, 12);
-      // Hood
-      fill_rect_c(ctx, COL_RAINCOAT, cx - 11, hy - 4, 22, 8);
-      break;
-    }
-
-    case OUTFIT_SCARF: {
-      // Scarf wrapped around neck
-      fill_rect_c(ctx, COL_SCARF, cx - 12, by - 2, 24, 5);
-      fill_rect_c(ctx, COL_SCARF, cx - 12, by + 3, 8, 14); // scarf tail
-      // Stripes on scarf
-      draw_line_c(ctx, GColorWhite, cx - 12, by,     cx + 12, by);
-      draw_line_c(ctx, GColorWhite, cx - 12, by + 3, cx - 4,  by + 3);
-      // Umbrella handle (right arm raised)
-      draw_line_c(ctx, COL_UMBRELLA, cx + 12, by - 2,  cx + 20, hy - 10);
-      // Umbrella canopy
-      fill_rect_c(ctx, COL_UMBRELLA, cx + 8, hy - 14, 20, 4);
-      fill_rect_c(ctx, COL_UMBRELLA, cx + 6, hy - 18, 24, 6);
-      draw_line_c(ctx, GColorWhite, cx + 6, hy - 18, cx + 30, hy - 18);
-      // Hat (winter beanie)
-      fill_rect_c(ctx, COL_SCARF, cx - 10, hy - 6, 20, 6);
-      fill_rect_c(ctx, COL_SCARF, cx - 6,  hy - 10, 12, 4);
-      fill_rect_c(ctx, GColorWhite, cx - 3, hy - 12, 6, 3); // pom pom
-      break;
-    }
-
-    case OUTFIT_SNOWSUIT: {
-      // Puffy snowsuit — white with light outline
-      fill_rect_c(ctx, COL_SNOWSUIT, cx - 13, by - 2, 26, 26);
-      // Suit texture lines (quilted look)
-      draw_line_c(ctx, GColorLightGray, cx - 13, by + 8, cx + 13, by + 8);
-      draw_line_c(ctx, GColorLightGray, cx - 13, by + 16, cx + 13, by + 16);
-      draw_line_c(ctx, GColorLightGray, cx, by - 2, cx, by + 24);
-      // Suit legs
-      fill_rect_c(ctx, COL_SNOWSUIT, cx - 16, frog_y - 8, 11, 12);
-      fill_rect_c(ctx, COL_SNOWSUIT, cx + 5,  frog_y - 8, 11, 12);
-      // Mittens
-      fill_rect_c(ctx, COL_SNOWSUIT, cx - 18, by + 12, 8, 6);
-      fill_rect_c(ctx, COL_SNOWSUIT, cx + 10, by + 12, 8, 6);
-      // Hood
-      fill_rect_c(ctx, COL_SNOWSUIT, cx - 12, hy - 6, 24, 10);
-      fill_rect_c(ctx, GColorMelon, cx - 8, hy - 2, 16, 8); // face opening
-      // Snowsuit boots
-      fill_rect_c(ctx, GColorDarkGray, cx - 16, frog_y + 2, 11, 4);
-      fill_rect_c(ctx, GColorDarkGray, cx + 5,  frog_y + 2, 11, 4);
-      break;
-    }
-
-    default: // OUTFIT_NAKED — no extra layers
-      break;
-  }
-
-  // If submerged, draw water covering lower half (over frog)
-  if (water_level == WATER_SUBMERGED) {
-    // Only top of head + eyes visible
-    // The water layer is drawn after, but we add bubbles
-    fill_rect_c(ctx, COL_WATER_1, cx - 2, hy + 6, 2, 2); // bubble
-    fill_rect_c(ctx, COL_WATER_1, cx + 3, hy + 4, 2, 2);
-  }
-}
-
-// ── Canvas draw ───────────────────────────────────────────────────────────────
+// ── Canvas update ─────────────────────────────────────────────────────────────
 static void canvas_update_proc(Layer *layer, GContext *ctx) {
   GRect bounds = layer_get_bounds(layer);
-  int outfit      = get_outfit(s_wmo_code, s_temperature);
-  int water_level = get_water_level(s_precip_mm10);
+  int W = bounds.size.w, H = bounds.size.h;
 
-  // 1. Background scene
-  draw_background(ctx, bounds, s_wmo_code, s_temperature);
+  int sky    = get_sky_type(s_wmo_code, s_hour);
+  int outfit = get_outfit(s_wmo_code, s_temperature);
+  int level  = get_level(s_precip_mm10);
+  bool snow  = is_snow_mode(s_temperature, s_wmo_code);
 
-  // 2. Ground + water
-  draw_ground_water(ctx, bounds, water_level);
+  // ── 1. Background ──────────────────────────────────────────────────────────
+  if (s_bg[sky]) {
+    graphics_draw_bitmap_in_rect(ctx, s_bg[sky], GRect(0, 0, W, H));
+  }
 
-  // 3. Frog — centred horizontally, feet on ground
-  int ground_y = bounds.size.h - 38;
-  int cx = bounds.size.w / 2;
-  draw_frog(ctx, cx, ground_y, outfit, water_level);
+  // ── 2. Ground / puddle / snow drift ───────────────────────────────────────
+  GBitmap **ground_set = snow ? s_ground_snow : s_ground_puddle;
+  if (ground_set[level]) {
+    graphics_draw_bitmap_in_rect(ctx, ground_set[level], GRect(0, 0, W, H));
+  }
 
-  // 4. HUD — time, date, precip drawn directly with outlined text
-  // Time (large, top)
-  draw_text_outlined(ctx, s_time_buf, s_font_time,
-    GRect(0, 2, bounds.size.w, 42),
-    GTextAlignmentCenter, GColorWhite, GColorBlack);
-  // Date (below time)
-  draw_text_outlined(ctx, s_date_buf, s_font_date,
-    GRect(0, 44, bounds.size.w, 22),
-    GTextAlignmentCenter, GColorWhite, GColorBlack);
-  // Precip bar (solid black strip at bottom for readability)
-  fill_rect_c(ctx, GColorBlack, 0, bounds.size.h - 18, bounds.size.w, 18);
-  graphics_context_set_text_color(ctx, GColorWhite);
-  graphics_draw_text(ctx, s_precip_buf, s_font_precip,
-    GRect(0, bounds.size.h - 17, bounds.size.w, 16),
-    GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+  // ── 3. Frog sprite ────────────────────────────────────────────────────────
+  int frog_idx = (level == LEVEL_SUBMERGED) ? 5 : outfit;
+  if (s_frog[frog_idx]) {
+    int foot_y = FROG_FOOT_Y[level];
+    int fx = (W - FROG_W) / 2;          // horizontally centred
+    int fy = foot_y - FROG_H;           // top of sprite
+    graphics_draw_bitmap_in_rect(ctx, s_frog[frog_idx],
+                                  GRect(fx, fy, FROG_W, FROG_H));
+  }
+
+  // ── 4. HUD ────────────────────────────────────────────────────────────────
+  // Time pill at top
+  graphics_context_set_fill_color(ctx, GColorFromRGBA(0, 0, 0, 107)); // ~42% black
+  graphics_fill_rect(ctx, GRect(W/2-72, 14, 144, 54), 8, GCornersAll);
+
+  draw_text_outlined(ctx, s_time_buf, s_font_time, GRect(0, 16, W, 44),
+                     GTextAlignmentCenter);
+  draw_text_outlined(ctx, s_date_buf, s_font_info, GRect(0, 54, W, 22),
+                     GTextAlignmentCenter);
+
+  // Info pill at bottom
+  graphics_context_set_fill_color(ctx, GColorFromRGBA(0, 0, 0, 148)); // ~58% black
+  graphics_fill_rect(ctx, GRect(W/2-74, 208, 148, 36), 10, GCornersAll);
+
+  graphics_context_set_text_color(ctx, GColorFromHEX(0x80c8ff)); // light blue
+  graphics_draw_text(ctx, s_temp_buf, s_font_info,
+    GRect(0, 210, W, 18), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+  graphics_context_set_text_color(ctx, GColorFromHEX(0x5ab4ff));
+  graphics_draw_text(ctx, s_precip_buf, s_font_info,
+    GRect(0, 226, W, 18), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 }
 
-// ── Time / date / precip updates ──────────────────────────────────────────────
-static void update_time(struct tm *tick_time) {
+// ── Buffer updates ────────────────────────────────────────────────────────────
+static void update_time(struct tm *t) {
   clock_copy_time_string(s_time_buf, sizeof(s_time_buf));
-  strftime(s_date_buf, sizeof(s_date_buf), "%a %d %b", tick_time);
+  strftime(s_date_buf, sizeof(s_date_buf), "%a %d %b", t);
+  s_hour = t->tm_hour;
   layer_mark_dirty(s_canvas_layer);
 }
 
-static void update_precip_text(void) {
+static void update_weather_text(void) {
   int mm_whole = s_precip_mm10 / 10;
   int mm_frac  = s_precip_mm10 % 10;
   const char *label;
-  int level = get_water_level(s_precip_mm10);
-  switch (level) {
-    case WATER_ANKLE:     label = "drizzle"; break;
-    case WATER_KNEE:      label = "rain";    break;
-    case WATER_WAIST:     label = "heavy";   break;
-    case WATER_SUBMERGED: label = "flood!";  break;
+  switch (get_level(s_precip_mm10)) {
+    case LEVEL_ANKLE:     label = "drizzle"; break;
+    case LEVEL_KNEE:      label = "rain";    break;
+    case LEVEL_WAIST:     label = "heavy";   break;
+    case LEVEL_SUBMERGED: label = "flood!";  break;
     default:              label = "dry";     break;
   }
-  snprintf(s_precip_buf, sizeof(s_precip_buf), "%d.%dmm %s",
-           mm_whole, mm_frac, label);
+  snprintf(s_precip_buf, sizeof(s_precip_buf), "%d.%dmm %s", mm_whole, mm_frac, label);
+  snprintf(s_temp_buf,   sizeof(s_temp_buf),   "%d\xc2\xb0""C", s_temperature); // degree symbol UTF-8
   layer_mark_dirty(s_canvas_layer);
 }
 
-// ── Tick handler ─────────────────────────────────────────────────────────────
-static void tick_handler(struct tm *tick_time, TimeUnits units_changed) {
-  update_time(tick_time);
+// ── Tick / AppMessage ─────────────────────────────────────────────────────────
+static void tick_handler(struct tm *t, TimeUnits units_changed) {
+  update_time(t);
 }
 
-// ── AppMessage ────────────────────────────────────────────────────────────────
-static void inbox_received_handler(DictionaryIterator *iter, void *ctx) {
+static void inbox_received_handler(DictionaryIterator *iter, void *context) {
   Tuple *t;
-
-  t = dict_find(iter, KEY_WMO_CODE);
-  if (t) s_wmo_code = (int)t->value->int32;
-
-  t = dict_find(iter, KEY_TEMPERATURE);
-  if (t) s_temperature = (int)t->value->int32;
-
-  t = dict_find(iter, KEY_PRECIP_MM10);
-  if (t) s_precip_mm10 = (int)t->value->int32;
-
-  layer_mark_dirty(s_canvas_layer);
-  update_precip_text();
+  t = dict_find(iter, KEY_WMO_CODE);    if (t) s_wmo_code    = (int)t->value->int32;
+  t = dict_find(iter, KEY_TEMPERATURE); if (t) s_temperature = (int)t->value->int32;
+  t = dict_find(iter, KEY_PRECIP_MM10); if (t) s_precip_mm10 = (int)t->value->int32;
+  update_weather_text();
 }
 
-// ── Window setup ─────────────────────────────────────────────────────────────
+// ── Bitmap loading / unloading ────────────────────────────────────────────────
+static void load_bitmaps(void) {
+  for (int i = 0; i < 6; i++) {
+    s_bg[i]   = gbitmap_create_with_resource(BG_RESOURCES[i]);
+    s_frog[i] = gbitmap_create_with_resource(FROG_RESOURCES[i]);
+  }
+  for (int i = 0; i < 5; i++) {
+    s_ground_puddle[i] = gbitmap_create_with_resource(GROUND_PUDDLE_RESOURCES[i]);
+    s_ground_snow[i]   = gbitmap_create_with_resource(GROUND_SNOW_RESOURCES[i]);
+  }
+}
+
+static void unload_bitmaps(void) {
+  for (int i = 0; i < 6; i++) {
+    if (s_bg[i])   { gbitmap_destroy(s_bg[i]);   s_bg[i]   = NULL; }
+    if (s_frog[i]) { gbitmap_destroy(s_frog[i]); s_frog[i] = NULL; }
+  }
+  for (int i = 0; i < 5; i++) {
+    if (s_ground_puddle[i]) { gbitmap_destroy(s_ground_puddle[i]); s_ground_puddle[i] = NULL; }
+    if (s_ground_snow[i])   { gbitmap_destroy(s_ground_snow[i]);   s_ground_snow[i]   = NULL; }
+  }
+}
+
+// ── Window ────────────────────────────────────────────────────────────────────
 static void window_load(Window *window) {
   Layer *root = window_get_root_layer(window);
   GRect bounds = layer_get_bounds(root);
 
-  // Load fonts once
-  s_font_time   = fonts_get_system_font(FONT_KEY_LECO_32_BOLD_NUMBERS);
-  s_font_date   = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
-  s_font_precip = fonts_get_system_font(FONT_KEY_GOTHIC_14);
+  s_font_time = fonts_get_system_font(FONT_KEY_LECO_42_NUMBERS);
+  s_font_info = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
 
-  // Canvas fills the screen — all drawing happens here
+  load_bitmaps();
+
   s_canvas_layer = layer_create(bounds);
   layer_set_update_proc(s_canvas_layer, canvas_update_proc);
   layer_add_child(root, s_canvas_layer);
 
-  // Seed buffers before first draw
+  // Seed buffers
   time_t now = time(NULL);
   struct tm *t = localtime(&now);
-  clock_copy_time_string(s_time_buf, sizeof(s_time_buf));
-  strftime(s_date_buf, sizeof(s_date_buf), "%a %d %b", t);
-  snprintf(s_precip_buf, sizeof(s_precip_buf), "0.0mm dry");
+  update_time(t);
+  update_weather_text();
 }
 
 static void window_unload(Window *window) {
+  unload_bitmaps();
   layer_destroy(s_canvas_layer);
 }
 
@@ -500,9 +304,7 @@ static void init(void) {
     .unload = window_unload,
   });
   window_stack_push(s_window, true);
-
   tick_timer_service_subscribe(MINUTE_UNIT, tick_handler);
-
   app_message_register_inbox_received(inbox_received_handler);
   app_message_open(256, 64);
 }

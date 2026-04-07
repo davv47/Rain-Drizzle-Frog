@@ -4,6 +4,9 @@
     "keywords": [],
     "name": "rain-drizzle-frog",
     "pebble": {
+        "capabilities": [
+            "location"
+        ],
         "displayName": "Rain Drizzle Frog",
         "enableMultiJS": true,
         "messageKeys": [
@@ -17,7 +20,12 @@
             "media": []
         },
         "sdkVersion": "3",
-        "targetPlatforms": ["aplite", "basalt", "chalk"],
+        "targetPlatforms": [
+            "basalt",
+            "chalk",
+            "emery",
+            "gabbro"
+        ],
         "uuid": "4394f16b-58c4-4372-ab91-be1fad1044b1",
         "watchapp": {
             "watchface": true
