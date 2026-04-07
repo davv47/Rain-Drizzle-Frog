@@ -17,14 +17,7 @@
         ],
         "projectType": "native",
         "resources": {
-            "media": [
-                {
-                    "file": "images/bg_clear.png",
-                    "name": "BG_CLEAR_TEST",
-                    "targetPlatforms": null,
-                    "type": "png"
-                }
-            ]
+            "media": []
         },
         "sdkVersion": "3",
         "targetPlatforms": [
